@@ -64,8 +64,13 @@ Changelog = "https://github.com/earthaccess-dev/earthaccess/blob/main/CHANGELOG.
 # IMPORTANT: When adding a new optional dependencies group, include it in this
 # "all" optional dependencies group.
 all = [
+  "earthaccess[harmony]",
   "earthaccess[kerchunk]",
   "earthaccess[virtualizarr]",
+]
+
+harmony = [
+  "harmony-py >=1.0.0",
 ]
 
 kerchunk = [
@@ -114,6 +119,7 @@ test = [
   "xarray",
   "h5netcdf",
   "geopandas",
+  "earthaccess[harmony]",
 ]
 docs = [
   "jupyterlab >=3",
@@ -178,6 +184,7 @@ disallow_untyped_defs = false
 module = [
   "fsspec.*",
   "h5netcdf.*",
+  "harmony.*",
   "dask.*",
   "pqdm.*",
   "s3fs",

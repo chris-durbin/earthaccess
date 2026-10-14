@@ -1,8 +1,10 @@
+import datetime
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import requests
 import s3fs
@@ -18,8 +20,15 @@ from earthaccess.services import DataServices
 from .auth import Auth
 from .results import DataCollection, DataGranule
 from .search import CollectionQuery, DataCollections, DataGranules, GranuleQuery
-from .store import Store
+from .store import Store, _is_interactive
 from .system import PROD, System
+from .transformations import (
+    TransformationBackend,
+    TransformationRequest,
+    TransformationResult,
+    get_backend,
+)
+from .transformations.base import normalize_temporal
 from .utils import _validation as validate
 
 logger = logging.getLogger(__name__)
@@ -480,6 +489,196 @@ def open(  # noqa: A001, PLR0913
         pqdm_kwargs=pqdm_kwargs,
         open_kwargs=open_kwargs,
     )
+
+
+def _transformation_backend(
+    backend: str,
+    backend_options: Mapping[str, Any] | None,
+) -> TransformationBackend:
+    auth = earthaccess.__auth__
+    if not auth.authenticated:
+        msg = "You must call earthaccess.login() before you can transform data"
+        raise RuntimeError(msg)
+    return get_backend(backend)(auth, **(backend_options or {}))
+
+
+def _collection_id(
+    item: DataCollection | DataGranule | str,
+) -> str:
+    if isinstance(item, DataGranule):
+        return item["meta"]["collection-concept-id"]
+    if isinstance(item, DataCollection):
+        return item.concept_id
+    return item
+
+
+def transformation_capabilities(
+    collection: DataCollection | DataGranule | str,
+    *,
+    backend: str = "harmony",
+    backend_options: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Get the transformations a backend supports for a collection.
+
+    Parameters:
+        collection: A collection, a granule from that collection, or a collection
+            concept ID.
+        backend: Name of the transformation backend, defaults to `"harmony"`.
+        backend_options: Keyword arguments for the backend's constructor.
+
+    Returns:
+        The backend's capabilities document for the collection. For Harmony, this
+        includes which subsetting operations are supported, the available output
+        formats, variables, and services.
+
+    Examples:
+        ```python
+        earthaccess.login()
+        capabilities = earthaccess.transformation_capabilities("C1996881146-POCLOUD")
+        capabilities["outputFormats"]
+        ```
+    """
+    transformer = _transformation_backend(backend, backend_options)
+    return transformer.capabilities(_collection_id(collection))
+
+
+def transform(  # noqa: PLR0913
+    granules: DataGranule | list[DataGranule] | None = None,
+    *,
+    collection: DataCollection | str | None = None,
+    variables: Sequence[str] | None = None,
+    bounding_box: tuple[float, float, float, float] | None = None,
+    temporal: Sequence[str | datetime.datetime | None] | None = None,
+    output_format: str | None = None,
+    crs: str | None = None,
+    concatenate: bool | None = None,
+    local_path: Path | str | None = None,
+    download: bool = True,
+    backend: str = "harmony",
+    backend_options: Mapping[str, Any] | None = None,
+    validate_capabilities: bool = True,
+    show_progress: bool | None = None,
+    force: bool = False,
+    **options: Any,
+) -> list[TransformationResult]:
+    """Transform data granules with a transformation service and download the outputs.
+
+    This submits a transformation job (e.g. subsetting, reprojection, or
+    reformatting) for each collection represented in `granules`, waits for the
+    jobs to complete, and downloads their outputs. Before a job is submitted, the
+    backend's capabilities for the collection are used to check that the requested
+    transformation is supported.
+
+    Transformations are performed by a pluggable backend; NASA Harmony
+    (`backend="harmony"`, requires `earthaccess[harmony]`) is currently provided.
+
+    Parameters:
+        granules: Granules to transform, e.g. from `earthaccess.search_data()`.
+            Granules from more than one collection result in one job per collection.
+        collection: Transform a whole collection (a `DataCollection` or concept ID)
+            instead of specific granules, constrained by `bounding_box` and
+            `temporal`. Mutually exclusive with `granules`.
+        variables: Names of the variables to subset.
+        bounding_box: Spatial subset as `(west, south, east, north)` in degrees.
+        temporal: Temporal subset as `(start, stop)`; values may be `datetime`
+            objects or ISO 8601 strings, and either end may be `None`.
+        output_format: Output MIME type, e.g. `"application/x-netcdf4"`.
+        crs: Output coordinate reference system, e.g. `"EPSG:4326"`.
+        concatenate: Whether to concatenate outputs into a single file.
+        local_path: Directory to download outputs into. If not supplied, defaults
+            to a subdirectory of the current working directory of the form
+            `data/YYYY-MM-DD-UUID`, as with `earthaccess.download()`.
+        download: Whether to download outputs. If `False`, only the output URLs
+            are returned.
+        backend: Name of the transformation backend, defaults to `"harmony"`.
+        backend_options: Keyword arguments for the backend's constructor. See the
+            backend's documentation, e.g. `HarmonyBackend`.
+        validate_capabilities: Whether to check the request against the backend's
+            capabilities for the collection before submitting it.
+        show_progress: Whether to display job progress. If not specified, defaults
+            to `True` for interactive sessions, otherwise `False`.
+        force: Re-download outputs that already exist locally.
+        options: Additional backend-specific request options. For Harmony, these
+            are passed to `harmony.Request`, e.g. `skip_preview=True`.
+
+    Returns:
+        One result per submitted job, including the job ID, final status, output
+        URLs, and the paths of downloaded files.
+
+    Raises:
+        RuntimeError: `earthaccess.login()` has not been called.
+        TransformationNotSupported: The backend cannot perform the requested
+            transformation for a collection.
+        TransformationFailed: A transformation job failed.
+
+    Examples:
+        ```python
+        earthaccess.login()
+        granules = earthaccess.search_data(
+            short_name="MUR-JPL-L4-GLOB-v4.1",
+            temporal=("2024-01-01", "2024-01-02"),
+        )
+        results = earthaccess.transform(
+            granules,
+            variables=["analysed_sst"],
+            bounding_box=(-98.0, 18.0, -80.0, 31.0),
+        )
+        results[0].files
+        ```
+    """
+    if (granules is None) == (collection is None):
+        msg = "Exactly one of `granules` or `collection` must be provided"
+        raise ValueError(msg)
+
+    transformer = _transformation_backend(backend, backend_options)
+
+    granule_ids_by_collection: dict[str, list[str] | None]
+    if collection is not None:
+        granule_ids_by_collection = {_collection_id(collection): None}
+    else:
+        if isinstance(granules, DataGranule):
+            granules = [granules]
+        if not granules:
+            msg = "No granules to transform"
+            raise ValueError(msg)
+        grouped: dict[str, list[str]] = {}
+        for granule in granules:
+            grouped.setdefault(_collection_id(granule), []).append(
+                granule["meta"]["concept-id"],
+            )
+        granule_ids_by_collection = dict(grouped)
+
+    if download and local_path is None:
+        today = datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%d")
+        local_path = Path.cwd() / "data" / f"{today}-{uuid4().hex[:6]}"
+
+    if show_progress is None:
+        show_progress = _is_interactive()
+
+    results = []
+    for collection_id, granule_ids in granule_ids_by_collection.items():
+        request = TransformationRequest(
+            collection_id=collection_id,
+            granule_ids=granule_ids,
+            variables=list(variables) if variables else None,
+            bounding_box=bounding_box,
+            temporal=normalize_temporal(temporal) if temporal else None,
+            output_format=output_format,
+            crs=crs,
+            concatenate=concatenate,
+            options=dict(options),
+        )
+        results.append(
+            transformer.run(
+                request,
+                local_path=Path(local_path) if download and local_path else None,
+                show_progress=show_progress,
+                validate=validate_capabilities,
+                force=force,
+            ),
+        )
+
+    return results
 
 
 def get_s3_credentials(

@@ -45,3 +45,27 @@ class EulaNotAccepted(DownloadFailure):
     This should be raised when a user attempts to access data that requires
     EULA acceptance, but they have not accepted the EULA.
     """
+
+
+class TransformationError(Exception):
+    """Base class for errors raised by transformation backends."""
+
+
+class TransformationNotSupported(TransformationError):  # noqa: N818
+    """The requested transformation is not supported for the collection.
+
+    This should be raised before a request is submitted, when the backend's
+    capabilities for a collection show that it cannot fulfill the request.
+    """
+
+
+class TransformationFailed(TransformationError):  # noqa: N818
+    """A submitted transformation job failed or did not complete.
+
+    Attributes:
+        job_id: The backend-specific identifier of the job.
+    """
+
+    def __init__(self, job_id: str, message: str) -> None:
+        super().__init__(message)
+        self.job_id = job_id

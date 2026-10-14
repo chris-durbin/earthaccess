@@ -18,6 +18,8 @@ from .api import (
     search_datasets,
     search_services,
     status,
+    transform,
+    transformation_capabilities,
 )
 from .auth import Auth
 from .search import DataCollection, DataCollections, DataGranule, DataGranules
@@ -59,6 +61,8 @@ __all__ = [
     "search_datasets",
     "search_services",
     "status",
+    "transform",
+    "transformation_capabilities",
     # virtual
     "virtualize",
 ]

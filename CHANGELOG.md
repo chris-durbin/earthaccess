@@ -7,6 +7,20 @@ and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+
+- `earthaccess.transform()` submits granules from `earthaccess.search_data()` to a
+  transformation service (subsetting, reprojection, reformatting), waits for the
+  job to finish, and downloads the outputs, as an alternative to
+  `earthaccess.download()`. The requested transformation is checked against the
+  collection's capabilities before a job is submitted, which can also be
+  inspected with `earthaccess.transformation_capabilities()`.
+- `earthaccess.transformations`, a plugin system for transformation backends.
+  Backends subclass `TransformationBackend` and are registered with
+  `register_backend()` or an `earthaccess.transformations` entry point. NASA
+  Harmony is provided as the `"harmony"` backend, via the new
+  `earthaccess[harmony]` optional extra (harmony-py).
+
 ## [v0.19.0] - 2026-09-03
 
 ### Breaking changes
